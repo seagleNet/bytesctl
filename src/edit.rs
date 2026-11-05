@@ -3,15 +3,20 @@
 
 use crate::api::{Client, RESTAURANT_PHONE, ReservationInfo, SelfEditOutcome, SelfEditRequest};
 use crate::store::{self, Status, Store};
-use crate::{confirm, local_time, parse_date, parse_time, resolve_key, save_store, slots_for_day};
+use crate::{
+    complete_reservation, confirm, local_time, parse_date, parse_time, resolve_key, save_store,
+    slots_for_day,
+};
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use chrono_tz::Europe::Zurich;
+use clap_complete::engine::ArgValueCompleter;
 use serde_json::json;
 
 #[derive(clap::Args)]
 pub struct EditArgs {
     /// Reservation id, unique prefix, or secret. Optional if exactly one upcoming reservation
+    #[arg(add = ArgValueCompleter::new(complete_reservation))]
     key: Option<String>,
     /// New number of guests
     #[arg(short, long)]

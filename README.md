@@ -16,6 +16,26 @@ cargo install --locked --git https://github.com/seagleNet/bytesctl
 
 Run the same command with `--force` to update. From a local checkout, use `cargo install --path .`.
 
+### Shell completions
+
+`bytesctl completions <shell>` prints a completion script for `bash`, `fish`, `zsh`, `elvish` or
+`powershell`. The script asks bytesctl on each Tab press, so install it once and it stays current
+after updates. `cancel` and `edit` also complete the IDs of your upcoming reservations.
+
+```sh
+# bash
+mkdir -p ~/.local/share/bash-completion/completions
+bytesctl completions bash > ~/.local/share/bash-completion/completions/bytesctl
+
+# fish
+mkdir -p ~/.config/fish/completions
+bytesctl completions fish > ~/.config/fish/completions/bytesctl.fish
+
+# zsh: the directory must be in $fpath before compinit runs in ~/.zshrc
+mkdir -p ~/.zfunc
+bytesctl completions zsh > ~/.zfunc/_bytesctl
+```
+
 ## Usage
 
 ```sh

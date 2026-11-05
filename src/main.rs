@@ -9,8 +9,11 @@ use anyhow::{Result, anyhow, bail};
 use api::{BookingRequest, Client, RESTAURANT_PHONE, Timeslot};
 use chrono::{Datelike, Days, Local, NaiveDate, NaiveTime};
 use chrono_tz::Europe::Zurich;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::engine::{ArgValueCompleter, CompletionCandidate};
+use clap_complete::env::{CompleteEnv, Shells};
 use config::{Config, non_empty};
+use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use store::{Reservation, Status, Store};
@@ -69,6 +72,7 @@ enum Cmd {
     /// Cancel a reservation (by id/prefix from `bookings`, or a raw secret)
     Cancel {
         /// Reservation id, unique prefix, or secret. Optional if exactly one upcoming reservation
+        #[arg(add = ArgValueCompleter::new(complete_reservation))]
         key: Option<String>,
         /// Skip confirmation prompt
         #[arg(short, long)]
@@ -79,6 +83,11 @@ enum Cmd {
     /// Manage the config file
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Print the shell completion setup script (see the README for how to install it)
+    Completions {
+        /// Shell to generate the script for
+        shell: clap_complete::Shell,
+    },
 }
 
 // Each bool is an independent on/off command-line flag, not hidden state.
@@ -186,6 +195,7 @@ impl Salutation {
 }
 
 fn main() {
+    CompleteEnv::with_factory(Cli::command).complete();
     if let Err(e) = run() {
         eprintln!("error: {e:#}");
         std::process::exit(1);
@@ -194,6 +204,9 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    if let Cmd::Completions { shell } = cli.cmd {
+        return print_completions(shell);
+    }
     let (cfg_path, explicit) = match cli.config {
         Some(p) => (p, true),
         None => (config::default_path()?, false),
@@ -222,8 +235,45 @@ fn run() -> Result<()> {
         Cmd::Edit(args) => edit::edit_cmd(&client, &args),
         Cmd::Cancel { key, yes } => cancel_cmd(&client, key.as_deref(), yes),
         Cmd::Menu(args) => menu_cmd(args, &cfg),
-        Cmd::Config(_) => unreachable!(),
+        Cmd::Config(_) | Cmd::Completions { .. } => unreachable!(),
     }
+}
+
+/// Print the script that makes `shell` ask this binary for completions on each Tab press.
+fn print_completions(shell: clap_complete::Shell) -> Result<()> {
+    let name = env!("CARGO_PKG_NAME");
+    let shells = Shells::builtins();
+    let completer = shells
+        .completer(&shell.to_string())
+        .ok_or_else(|| anyhow!("no completions for {shell}"))?;
+    completer.write_registration("COMPLETE", name, name, name, &mut io::stdout())?;
+    Ok(())
+}
+
+/// Tab completion for reservation arguments, from the local bookings file.
+fn complete_reservation(current: &OsStr) -> Vec<CompletionCandidate> {
+    let store = store::default_path().and_then(|path| Store::load(&path));
+    store.map_or_else(
+        |_| Vec::new(),
+        |s| reservation_candidates(&s, chrono::Utc::now(), &current.to_string_lossy()),
+    )
+}
+
+/// Upcoming reservations whose short id starts with `prefix`. Never offers secrets.
+fn reservation_candidates(
+    s: &Store,
+    now: chrono::DateTime<chrono::Utc>,
+    prefix: &str,
+) -> Vec<CompletionCandidate> {
+    s.list(false, now)
+        .into_iter()
+        .filter(|r| r.id.is_some() && r.short_id().starts_with(prefix))
+        .map(|r| {
+            let when = r.at.with_timezone(&Zurich).format("%a %d.%m. %H:%M");
+            let help = format!("{when}, {} guest(s)", r.people);
+            CompletionCandidate::new(r.short_id()).help(Some(help.into()))
+        })
+        .collect()
 }
 
 fn config_cmd(cmd: &ConfigCmd, path: &std::path::Path, explicit: bool) -> Result<()> {
@@ -941,6 +991,63 @@ fn confirm(prompt: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_shell_has_completions() {
+        for shell in [
+            clap_complete::Shell::Bash,
+            clap_complete::Shell::Elvish,
+            clap_complete::Shell::Fish,
+            clap_complete::Shell::PowerShell,
+            clap_complete::Shell::Zsh,
+        ] {
+            assert!(
+                Shells::builtins().completer(&shell.to_string()).is_some(),
+                "{shell}"
+            );
+        }
+    }
+
+    #[test]
+    fn reservation_candidates_offer_upcoming_ids_only() {
+        let reservation = |id: Option<&str>, at: &str, status| Reservation {
+            id: id.map(str::to_string),
+            secret: "topsecret".into(),
+            at: at.parse().unwrap(),
+            people: 2,
+            shift: "Mittag".into(),
+            name: "Max Muster".into(),
+            email: String::new(),
+            comment: String::new(),
+            provisional: false,
+            booked_at: at.parse().unwrap(),
+            status,
+            cancelled_at: None,
+            state: None,
+            cancelable: None,
+            not_found: false,
+            checked_at: None,
+        };
+        let s = Store {
+            reservations: vec![
+                reservation(Some("abc123xyz"), "2026-11-10T10:45:00Z", Status::Booked),
+                reservation(Some("abd456xyz"), "2026-11-11T10:45:00Z", Status::Booked),
+                reservation(Some("old000xyz"), "2026-11-01T10:45:00Z", Status::Booked),
+                reservation(Some("can000xyz"), "2026-11-12T10:45:00Z", Status::Cancelled),
+                reservation(None, "2026-11-13T10:45:00Z", Status::Booked),
+            ],
+        };
+        let now = "2026-11-05T10:00:00Z".parse().unwrap();
+        let ids = |prefix| -> Vec<String> {
+            reservation_candidates(&s, now, prefix)
+                .iter()
+                .map(|c| c.get_value().to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(ids(""), ["abc123", "abd456"]);
+        assert_eq!(ids("abd"), ["abd456"]);
+        assert_eq!(ids("top"), Vec::<String>::new());
+    }
 
     #[test]
     fn cancel_hint_warns_only_on_definite_no() {
