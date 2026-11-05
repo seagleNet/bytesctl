@@ -6,9 +6,19 @@ The widget's public API key and restaurant id aren't stored in the code: bytesct
 from the booking widget on the homepage on first use, caches them in
 `~/.cache/bytesctl/widget.json`, and fetches them again if aleno ever rejects the cached key.
 
-```sh
-cargo install --path .
+## Installation
 
+Needs a [Rust toolchain](https://rustup.rs/) (Rust 1.88 or newer):
+
+```sh
+cargo install --locked --git https://github.com/seagleNet/bytesctl
+```
+
+Run the same command with `--force` to update. From a local checkout, use `cargo install --path .`.
+
+## Usage
+
+```sh
 bytesctl calendar --month 2026-11          # open / closed days
 bytesctl slots 2026-11-10 -p 4             # free times for 4 guests (add --all for full ones)
 bytesctl book -d 2026-11-10 -t 19:00 -p 2 \
