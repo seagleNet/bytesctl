@@ -298,6 +298,7 @@ fn explain_outcome(client: &Client, outcome: &SelfEditOutcome, c: &Change) -> St
 fn explain_self_edit_error(code: &str) -> &str {
     match code {
         "payments-enabled" | "payments-required" => "payments are required for changes",
+        "self-edit-disabled" => "online changes are switched off",
         other => other,
     }
 }

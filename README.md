@@ -35,13 +35,18 @@ Every reservation is recorded in `~/.local/share/bytesctl/bookings.json` (respec
 yourself. The file is created with mode 0600; `bookings --show-secrets` prints the secrets.
 `cancel <secret>` still accepts a raw secret for reservations made elsewhere.
 
-The status column shows what bytesctl recorded at booking time until you run `--refresh`; then it
-shows aleno's state: `open` (registered, not explicitly accepted — aleno uses the same state for
+The status column shows the status from booking time until you run `--refresh`, then aleno's
+latest state: `open` (registered, not explicitly accepted — aleno uses the same state for
 provisional requests), `accepted`, `reconfirmed`, `cancelled`, `waiting list`, `moved`, … A
 reservation aleno no longer knows shows as `not found`; changed times or party sizes are updated.
+
+`book` asks aleno for the new reservation's status right away and warns you if it can't be
+cancelled online (a same-day booking couldn't be, for example). aleno only reports yes or no, not
+the deadline, so bytesctl can't warn before you book.
+
 `cancel` checks with aleno first and stops early if the reservation is already cancelled or can no
 longer be cancelled online. This uses the booking widget's undocumented `popup/info` endpoint, so
-the status mapping may need adjusting once verified against a real booking.
+the less common states in the mapping are unverified.
 
 `edit` uses aleno's guest self-edit (the "change reservation" link in the confirmation email):
 it first asks aleno whether the change is possible, shows old → new, and only applies it after

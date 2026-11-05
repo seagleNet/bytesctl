@@ -631,30 +631,17 @@ fn book(client: &Client, args: BookArgs, cfg: &Config) -> Result<()> {
         customer_additional_consents: vec![],
     };
     let resp = client.create_booking(&req)?;
-    report_booking(&resp, &req, slot);
+    report_booking(client, &resp, &req, slot);
     Ok(())
 }
 
 /// Print the outcome of a booking and save it locally so it can be listed and cancelled.
-fn report_booking(resp: &api::BookingResponse, req: &BookingRequest, slot: &Timeslot) {
-    let saved = resp.secret.as_ref().map(|secret| Reservation {
-        id: resp.reservation_id.clone(),
-        secret: secret.clone(),
-        at: slot.selected_date,
-        people: req.people_count,
-        shift: slot.shift_name.clone(),
-        name: format!("{} {}", req.customer_first_name, req.customer_last_name),
-        email: req.customer_email.clone(),
-        comment: req.comment.clone(),
-        provisional: resp.is_provisional,
-        booked_at: chrono::Utc::now(),
-        status: Status::Booked,
-        cancelled_at: None,
-        state: None,
-        cancelable: None,
-        not_found: false,
-        checked_at: None,
-    });
+fn report_booking(
+    client: &Client,
+    resp: &api::BookingResponse,
+    req: &BookingRequest,
+    slot: &Timeslot,
+) {
     if resp.is_provisional {
         println!(
             "Reservation request sent (provisional — awaiting confirmation by the restaurant)."
@@ -665,23 +652,58 @@ fn report_booking(resp: &api::BookingResponse, req: &BookingRequest, slot: &Time
     if let Some(id) = &resp.reservation_id {
         println!("  Reservation ID: {id}");
     }
-    match saved {
-        Some(r) => {
-            let short = r.short_id();
-            // The booking already exists; never fail the command because the record can't be saved.
-            match save_reservation(r) {
-                Ok(()) => println!("  Cancel with:    bytesctl cancel {short}"),
-                Err(e) => {
-                    eprintln!("warning: could not save reservation locally: {e:#}");
-                    if let Some(secret) = &resp.secret {
-                        println!("  Cancel with:    bytesctl cancel {secret}");
-                    }
-                }
-            }
-        }
-        None => eprintln!(
+    let Some(secret) = &resp.secret else {
+        eprintln!(
             "warning: the server returned no cancellation secret; cancel via the confirmation email"
-        ),
+        );
+        return;
+    };
+
+    let now = chrono::Utc::now();
+    let mut r = Reservation {
+        id: resp.reservation_id.clone(),
+        secret: secret.clone(),
+        at: slot.selected_date,
+        people: req.people_count,
+        shift: slot.shift_name.clone(),
+        name: format!("{} {}", req.customer_first_name, req.customer_last_name),
+        email: req.customer_email.clone(),
+        comment: req.comment.clone(),
+        provisional: resp.is_provisional,
+        booked_at: now,
+        status: Status::Booked,
+        cancelled_at: None,
+        state: None,
+        cancelable: None,
+        not_found: false,
+        checked_at: None,
+    };
+    // The booking already exists, so neither of these steps may fail the command.
+    if let Ok(Some(info)) = client.reservation_info(secret) {
+        r.apply_remote(Some(&info), now);
+        println!("  Status:         {}", r.status_label(now));
+    }
+    let short = r.short_id();
+    let cancelable = r.cancelable;
+    let key = match save_reservation(r) {
+        Ok(()) => short,
+        Err(e) => {
+            eprintln!("warning: could not save reservation locally: {e:#}");
+            println!("  Secret:         {secret}");
+            secret.clone()
+        }
+    };
+    println!("{}", cancel_hint(cancelable, &key));
+}
+
+/// How to cancel a new booking. Only a definite "no" from aleno replaces the usual hint.
+fn cancel_hint(cancelable: Option<bool>, key: &str) -> String {
+    if cancelable == Some(false) {
+        format!(
+            "\n⚠ This reservation can't be cancelled online.\n  To cancel, call the restaurant: {RESTAURANT_PHONE}"
+        )
+    } else {
+        format!("  Cancel with:    bytesctl cancel {key}")
     }
 }
 
@@ -914,4 +936,21 @@ fn confirm(prompt: &str) -> Result<bool> {
         line.trim().to_lowercase().as_str(),
         "y" | "yes" | "j" | "ja"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_hint_warns_only_on_definite_no() {
+        assert!(cancel_hint(Some(false), "abc").contains("can't be cancelled online"));
+        assert!(!cancel_hint(Some(false), "abc").contains("bytesctl cancel"));
+        for known in [Some(true), None] {
+            assert_eq!(
+                cancel_hint(known, "abc"),
+                "  Cancel with:    bytesctl cancel abc"
+            );
+        }
+    }
 }
