@@ -663,7 +663,10 @@ pub fn print(menu: &Menu, today: NaiveDate, opts: &PrintOptions) {
             return;
         };
         match menu.days.iter().find(|d| d.weekday == Some(wd)) {
-            Some(day) => print_day(menu, day, None, width),
+            Some(day) => {
+                print_items("Vorspeise", &menu.starters, width);
+                print_day(menu, day, None, width);
+            }
             None => println!(
                 "\nNo lunch menu for today ({}).",
                 today.format("%a %d.%m.%Y")
