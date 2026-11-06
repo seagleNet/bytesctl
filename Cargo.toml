@@ -16,3 +16,11 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 toml = "1.2.0"
 toml_edit = "0.25.18"
+
+# Smallest binary that doesn't cost speed. opt-level stays at the default 3: "s" would save
+# another third of the size but made menu parsing about 15% slower.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
