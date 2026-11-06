@@ -1,11 +1,12 @@
 //! `bytesctl edit`: change the party size, date/time or comment of a reservation through
 //! aleno's guest self-edit (`popup/selfEdit/check` then `popup/selfEdit/submit`).
 
-use crate::api::{Client, RESTAURANT_PHONE, ReservationInfo, SelfEditOutcome, SelfEditRequest};
+use crate::api::{Client, ReservationInfo, SelfEditOutcome, SelfEditRequest};
+use crate::config::Config;
 use crate::store::{self, Status, Store};
 use crate::{
-    complete_reservation, confirm, local_time, parse_date, parse_time, resolve_key, save_store,
-    slots_for_day,
+    client_for, complete_reservation, confirm, local_time, parse_date, parse_time, resolve_key,
+    save_store, slots_for_day,
 };
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
@@ -51,7 +52,7 @@ struct Change {
     shift_name: Option<String>,
 }
 
-pub fn edit_cmd(client: &Client, a: &EditArgs) -> Result<()> {
+pub fn edit_cmd(client: &Client, cfg: &Config, a: &EditArgs) -> Result<()> {
     if a.people.is_none() && a.date.is_none() && a.time.is_none() && a.comment.is_none() {
         bail!("nothing to change: pass --people, --date, --time and/or --comment");
     }
@@ -77,6 +78,12 @@ pub fn edit_cmd(client: &Client, a: &EditArgs) -> Result<()> {
         None => a.key.clone().unwrap_or_default(),
     };
 
+    // A saved reservation knows its restaurant; a raw secret uses the selected one.
+    let client = &match index {
+        Some(i) => client_for(client, cfg, &s.reservations[i].restaurant)?,
+        None => client.clone(),
+    };
+
     // Always start from aleno's current view of the reservation.
     let info = client.reservation_info(&secret)?;
     if let Some(i) = index {
@@ -90,8 +97,9 @@ pub fn edit_cmd(client: &Client, a: &EditArgs) -> Result<()> {
     }
     if let Some(code) = &info.self_edit_error {
         bail!(
-            "aleno doesn't allow changing this reservation online ({}); please call the restaurant at {RESTAURANT_PHONE}",
-            explain_self_edit_error(code)
+            "aleno doesn't allow changing this reservation online ({}); please {}",
+            explain_self_edit_error(code),
+            client.restaurant().contact()
         );
     }
 
@@ -288,8 +296,9 @@ fn explain_outcome(client: &Client, outcome: &SelfEditOutcome, c: &Change) -> St
         SelfEditOutcome::Questions => "the new time's shift asks additional questions, which bytesctl doesn't support; please use the change link in your confirmation email".into(),
         SelfEditOutcome::PaymentRequired => "this change would need a credit-card guarantee or payment; please use the change link in your confirmation email".into(),
         SelfEditOutcome::GroupReservation => format!(
-            "with {} guests this becomes a group reservation, which the restaurant arranges directly; please call {RESTAURANT_PHONE}",
-            c.new_people
+            "with {} guests this becomes a group reservation, which the restaurant arranges directly; please {}",
+            c.new_people,
+            client.restaurant().contact()
         ),
         SelfEditOutcome::Rejected(code, msg) => format!(
             "aleno rejected the change: {}",

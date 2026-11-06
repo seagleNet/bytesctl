@@ -3,8 +3,9 @@
 Reserve a table at [Restaurant bytes, Chur](https://bytes-chur.ch/) from the terminal.
 It talks to the same aleno reservation API as the booking widget on the website.
 The widget's public API key and restaurant id aren't stored in the code: bytesctl reads them
-from the booking widget on the homepage on first use, caches them in
-`~/.cache/bytesctl/widget.json`, and fetches them again if aleno ever rejects the cached key.
+from the booking widget on the restaurant's website on first use, caches them in
+`~/.cache/bytesctl/widget-<restaurant>.json`, and fetches them again if aleno ever rejects the
+cached key. Other restaurants that use aleno can be added, see [Restaurants](#restaurants).
 
 ## Installation
 
@@ -87,6 +88,48 @@ the restaurant's phone number. Like `popup/info`, the self-edit endpoints are un
 The PDF is cached in `~/.cache/bytesctl/` (respects `$XDG_CACHE_HOME`), so repeated calls are
 instant and work offline. The cache is used until the menu's week is over; after that the website
 is re-checked (at most hourly). `bytesctl menu --refresh` forces a fresh download.
+
+## Restaurants
+
+bytes is built in. Any other restaurant that takes reservations through aleno can be added with
+`--url` pointing at the page that embeds the booking widget. bytesctl checks that the page has a
+widget, then adds the restaurant to your config file and leaves the rest of the file untouched:
+
+```sh
+bytesctl restaurants add muster --url https://restaurant.example/ \
+  --name "Restaurant Muster" --phone "+41 44 123 45 67"
+bytesctl restaurants remove muster
+```
+
+`--name` and `--phone` are optional, and `--force` replaces an existing entry. `remove` refuses a
+restaurant that has upcoming reservations, because they couldn't be cancelled with bytesctl
+afterwards; `--force` overrides that too.
+
+The result is a normal config section, which you can also write by hand:
+
+```toml
+[defaults]
+restaurant = "muster"  # optional, instead of bytes
+
+[restaurants.muster]
+name = "Restaurant Muster"
+url = "https://restaurant.example/"
+phone = "+41 44 123 45 67"  # optional, shown when something has to be done by phone
+```
+
+```sh
+bytesctl restaurants                                 # what you can book
+bytesctl --restaurant muster slots 2026-11-16   # or set $BYTES_RESTAURANT
+bytesctl --restaurant muster book -t 12:30 -p 2
+```
+
+`bookings` lists reservations from all restaurants, and `cancel` and `edit` go to the restaurant the
+reservation was made at, so they don't need `--restaurant`. Pass it only with a raw secret that
+isn't saved locally. `book` shows aleno's name for the restaurant before you confirm.
+
+If a page embeds several widgets, bytesctl stops and lists their ids. Pick one with
+`--restaurant-id` when adding it, or `restaurant_id = "…"` in its section. `menu` only works for bytes, because the parser
+is specific to its PDF. Times are always Swiss local time.
 
 ## Config file
 

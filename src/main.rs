@@ -5,20 +5,21 @@ mod menu;
 mod store;
 mod widget;
 
-use anyhow::{Result, anyhow, bail};
-use api::{BookingRequest, Client, RESTAURANT_PHONE, Timeslot};
+use anyhow::{Context, Result, anyhow, bail};
+use api::{BookingRequest, Client, Timeslot};
 use chrono::{Datelike, Days, Local, NaiveDate, NaiveTime};
 use chrono_tz::Europe::Zurich;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::engine::{ArgValueCompleter, CompletionCandidate};
 use clap_complete::env::{CompleteEnv, Shells};
-use config::{Config, non_empty};
+use config::{Config, DEFAULT_RESTAURANT, Restaurant, non_empty};
 use std::ffi::OsStr;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use store::{Reservation, Status, Store};
 
-/// Reserve a table at Restaurant bytes, Chur (bytes-chur.ch) from the command line.
+/// Reserve a table at Restaurant bytes, Chur (bytes-chur.ch) and other restaurants from the
+/// command line.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
@@ -29,6 +30,10 @@ struct Cli {
     /// Path to config file [default: ~/.config/bytesctl/config.toml]
     #[arg(long, global = true, env = "BYTES_CONFIG")]
     config: Option<PathBuf>,
+
+    /// Restaurant to use [default: config or "bytes"]
+    #[arg(long, global = true, env = "BYTES_RESTAURANT", add = ArgValueCompleter::new(complete_restaurant))]
+    restaurant: Option<String>,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -78,8 +83,13 @@ enum Cmd {
         #[arg(short, long)]
         yes: bool,
     },
-    /// Print this week's lunch menu (Mittagskarte)
+    /// Print this week's lunch menu (Mittagskarte); bytes only
     Menu(MenuArgs),
+    /// List, add or remove the restaurants you can book
+    Restaurants {
+        #[command(subcommand)]
+        cmd: Option<RestaurantsCmd>,
+    },
     /// Manage the config file
     #[command(subcommand)]
     Config(ConfigCmd),
@@ -87,6 +97,42 @@ enum Cmd {
     Completions {
         /// Shell to generate the script for
         shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Subcommand)]
+enum RestaurantsCmd {
+    /// Add a restaurant that takes reservations through aleno
+    Add {
+        /// Short name to use with --restaurant (letters, digits, - and _)
+        slug: String,
+        /// Page that embeds the booking widget
+        #[arg(long)]
+        url: String,
+        /// Full name of the restaurant
+        #[arg(long)]
+        name: Option<String>,
+        /// Phone number, shown when something has to be done by phone
+        #[arg(long)]
+        phone: Option<String>,
+        /// aleno restaurant id, if the page embeds several widgets
+        #[arg(long)]
+        restaurant_id: Option<String>,
+        /// Don't check that the page has a booking widget
+        #[arg(long)]
+        no_check: bool,
+        /// Replace the restaurant if it already exists
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove a restaurant from the config file
+    Remove {
+        /// Short name of the restaurant
+        #[arg(add = ArgValueCompleter::new(complete_restaurant))]
+        slug: String,
+        /// Remove it even if it has upcoming reservations
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -219,7 +265,18 @@ fn run() -> Result<()> {
         .lang
         .or_else(|| non_empty(cfg.defaults.lang.as_deref()))
         .unwrap_or_else(|| "de".into());
-    let client = Client::new(&lang)?;
+    let slug = cli
+        .restaurant
+        .as_deref()
+        .and_then(|r| non_empty(Some(r)))
+        .unwrap_or_else(|| cfg.default_restaurant());
+    if let Cmd::Restaurants { cmd } = cli.cmd {
+        return match cmd {
+            None => restaurants_cmd(&cfg, &slug),
+            Some(cmd) => edit_restaurants(cmd, &cfg, &cfg_path),
+        };
+    }
+    let client = Client::new(&lang, cfg.restaurant(&slug)?)?;
     match cli.cmd {
         Cmd::Calendar { month } => calendar(&client, month),
         Cmd::Slots { date, people, all } => {
@@ -231,11 +288,16 @@ fn run() -> Result<()> {
             all,
             show_secrets,
             refresh,
-        } => bookings_cmd(&client, all, show_secrets, refresh),
-        Cmd::Edit(args) => edit::edit_cmd(&client, &args),
-        Cmd::Cancel { key, yes } => cancel_cmd(&client, key.as_deref(), yes),
-        Cmd::Menu(args) => menu_cmd(args, &cfg),
-        Cmd::Config(_) | Cmd::Completions { .. } => unreachable!(),
+        } => bookings_cmd(&client, &cfg, all, show_secrets, refresh),
+        Cmd::Edit(args) => edit::edit_cmd(&client, &cfg, &args),
+        Cmd::Cancel { key, yes } => cancel_cmd(&client, &cfg, key.as_deref(), yes),
+        Cmd::Menu(args) => {
+            if slug != DEFAULT_RESTAURANT {
+                bail!("the lunch menu is only available for {DEFAULT_RESTAURANT}, not {slug}");
+            }
+            menu_cmd(args, &cfg)
+        }
+        Cmd::Config(_) | Cmd::Completions { .. } | Cmd::Restaurants { .. } => unreachable!(),
     }
 }
 
@@ -248,6 +310,144 @@ fn print_completions(shell: clap_complete::Shell) -> Result<()> {
         .ok_or_else(|| anyhow!("no completions for {shell}"))?;
     completer.write_registration("COMPLETE", name, name, name, &mut io::stdout())?;
     Ok(())
+}
+
+/// Tab completion for `--restaurant`, from the config file.
+fn complete_restaurant(current: &OsStr) -> Vec<CompletionCandidate> {
+    let path = std::env::var_os("BYTES_CONFIG")
+        .map(PathBuf::from)
+        .map_or_else(config::default_path, Ok);
+    let cfg = path
+        .and_then(|p| config::load(&p, false))
+        .unwrap_or_default();
+    let prefix = current.to_string_lossy();
+    cfg.restaurant_slugs()
+        .into_iter()
+        .filter(|slug| slug.starts_with(prefix.as_ref()))
+        .map(|slug| {
+            let name = cfg.restaurant(&slug).ok().map(|r| r.name.into());
+            CompletionCandidate::new(slug).help(name)
+        })
+        .collect()
+}
+
+fn restaurants_cmd(cfg: &Config, selected: &str) -> Result<()> {
+    for slug in cfg.restaurant_slugs() {
+        let r = cfg.restaurant(&slug)?;
+        let mark = if slug == selected { "*" } else { " " };
+        println!("{mark} {slug:<16} {:<26} {}", r.name, r.url);
+    }
+    Ok(())
+}
+
+fn edit_restaurants(cmd: RestaurantsCmd, cfg: &Config, path: &Path) -> Result<()> {
+    match cmd {
+        RestaurantsCmd::Add {
+            slug,
+            url,
+            name,
+            phone,
+            restaurant_id,
+            no_check,
+            force,
+        } => {
+            let section = config::RestaurantConfig {
+                name: non_empty(name.as_deref()),
+                url,
+                phone: non_empty(phone.as_deref()),
+                restaurant_id: non_empty(restaurant_id.as_deref()),
+            };
+            add_restaurant(cfg, path, &slug, &section, no_check, force)
+        }
+        RestaurantsCmd::Remove { slug, force } => remove_restaurant(cfg, path, &slug, force),
+    }
+}
+
+fn add_restaurant(
+    cfg: &Config,
+    path: &Path,
+    slug: &str,
+    section: &config::RestaurantConfig,
+    no_check: bool,
+    force: bool,
+) -> Result<()> {
+    config::check_slug(slug)?;
+    if !force && cfg.restaurant_slugs().iter().any(|s| s == slug) {
+        bail!("restaurant '{slug}' already exists (use --force to replace it)");
+    }
+    let parsed = reqwest::Url::parse(&section.url)
+        .map_err(|e| anyhow!("invalid --url '{}': {e}", section.url))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        bail!("invalid --url '{}': must start with https://", section.url);
+    }
+    if !no_check {
+        let restaurant = Restaurant {
+            slug: slug.to_string(),
+            name: slug.to_string(),
+            url: section.url.clone(),
+            phone: None,
+            aleno_id: section.restaurant_id.clone(),
+        };
+        let found = widget::refresh(&http_client()?, &restaurant).with_context(|| {
+            format!("'{slug}' was not added (bytesctl only supports aleno restaurants so far)")
+        })?;
+        println!("Found an aleno booking widget ({}).", found.restaurant_id);
+    }
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => config::TEMPLATE.to_string(),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
+    let text = config::with_restaurant(&text, slug, section)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // Written in place to keep the file's permissions and any symlink to it.
+    std::fs::write(path, text).with_context(|| format!("cannot write {}", path.display()))?;
+    println!("Added {slug} to {}", path.display());
+    println!("Use it with: bytesctl --restaurant {slug} slots");
+    Ok(())
+}
+
+fn remove_restaurant(cfg: &Config, path: &Path, slug: &str, force: bool) -> Result<()> {
+    if !cfg.restaurants.contains_key(slug) {
+        if slug == DEFAULT_RESTAURANT {
+            bail!("{slug} is built in and can't be removed");
+        }
+        bail!("'{slug}' is not in {}", path.display());
+    }
+    if cfg.default_restaurant() == slug {
+        bail!("{slug} is your default restaurant; change `restaurant` in [defaults] first");
+    }
+    let now = chrono::Utc::now();
+    let store = Store::load(&store::default_path()?)?;
+    let upcoming = store
+        .list(false, now)
+        .iter()
+        .filter(|r| r.restaurant == slug)
+        .count();
+    if upcoming > 0 && !force {
+        bail!(
+            "{slug} has {upcoming} upcoming reservation(s), which can't be cancelled or changed \
+             with bytesctl once it's removed (use --force to remove it anyway)"
+        );
+    }
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let text = config::without_restaurant(&text, slug)?;
+    std::fs::write(path, text).with_context(|| format!("cannot write {}", path.display()))?;
+    widget::forget(slug);
+    println!("Removed {slug} from {}", path.display());
+    Ok(())
+}
+
+/// A client for the restaurant a saved reservation belongs to.
+fn client_for(client: &Client, cfg: &Config, slug: &str) -> Result<Client> {
+    if client.restaurant().slug == slug {
+        Ok(client.clone())
+    } else {
+        Ok(client.for_restaurant(cfg.restaurant(slug)?))
+    }
 }
 
 /// Tab completion for reservation arguments, from the local bookings file.
@@ -270,13 +470,13 @@ fn reservation_candidates(
         .filter(|r| r.id.is_some() && r.short_id().starts_with(prefix))
         .map(|r| {
             let when = r.at.with_timezone(&Zurich).format("%a %d.%m. %H:%M");
-            let help = format!("{when}, {} guest(s)", r.people);
+            let help = format!("{when}, {} guest(s), {}", r.people, r.restaurant);
             CompletionCandidate::new(r.short_id()).help(Some(help.into()))
         })
         .collect()
 }
 
-fn config_cmd(cmd: &ConfigCmd, path: &std::path::Path, explicit: bool) -> Result<()> {
+fn config_cmd(cmd: &ConfigCmd, path: &Path, explicit: bool) -> Result<()> {
     match cmd {
         ConfigCmd::Path => {
             println!("{}", path.display());
@@ -631,12 +831,18 @@ fn book(client: &Client, args: BookArgs, cfg: &Config) -> Result<()> {
     if !questions.is_empty() {
         bail!(
             "the '{}' shift requires answering additional questions, which this tool does not support; \
-             please book via https://bytes-chur.ch/kontakt/#reservation",
-            slot.shift_name
+             please book via {}",
+            slot.shift_name,
+            client.restaurant().url
         );
     }
 
-    println!("Reservation at Restaurant bytes, Chur");
+    // aleno's own name, so that a mix-up in the config shows before anything is booked.
+    let at = slot
+        .restaurant_name
+        .as_ref()
+        .unwrap_or(&client.restaurant().name);
+    println!("Reservation at {at}");
     println!(
         "  When:   {} {} ({})",
         date.format("%a %d.%m.%Y"),
@@ -711,6 +917,7 @@ fn report_booking(
 
     let now = chrono::Utc::now();
     let mut r = Reservation {
+        restaurant: client.restaurant().slug.clone(),
         id: resp.reservation_id.clone(),
         secret: secret.clone(),
         at: slot.selected_date,
@@ -743,15 +950,16 @@ fn report_booking(
             secret.clone()
         }
     };
-    println!("{}", cancel_hint(cancelable, &key));
+    println!(
+        "{}",
+        cancel_hint(cancelable, &key, &client.restaurant().contact())
+    );
 }
 
 /// How to cancel a new booking. Only a definite "no" from aleno replaces the usual hint.
-fn cancel_hint(cancelable: Option<bool>, key: &str) -> String {
+fn cancel_hint(cancelable: Option<bool>, key: &str, contact: &str) -> String {
     if cancelable == Some(false) {
-        format!(
-            "\n⚠ This reservation can't be cancelled online.\n  To cancel, call the restaurant: {RESTAURANT_PHONE}"
-        )
+        format!("\n⚠ This reservation can't be cancelled online.\n  To cancel, please {contact}.")
     } else {
         format!("  Cancel with:    bytesctl cancel {key}")
     }
@@ -764,25 +972,32 @@ fn save_reservation(r: Reservation) -> Result<()> {
     s.save(&path)
 }
 
-fn describe(r: &Reservation) -> String {
+fn describe(r: &Reservation, restaurant: &Restaurant) -> String {
     let local = r.at.with_timezone(&Zurich);
     format!(
-        "{}  {} ({}), {} guest(s), {}",
+        "{}  {} ({}), {} guest(s), {}, at {}",
         local.format("%a %d.%m.%Y %H:%M"),
         r.short_id(),
         r.shift,
         r.people,
-        r.name
+        r.name,
+        restaurant.name
     )
 }
 
-fn bookings_cmd(client: &Client, all: bool, show_secrets: bool, refresh: bool) -> Result<()> {
+fn bookings_cmd(
+    client: &Client,
+    cfg: &Config,
+    all: bool,
+    show_secrets: bool,
+    refresh: bool,
+) -> Result<()> {
     let path = store::default_path()?;
     let mut s = Store::load(&path)?;
     let now = chrono::Utc::now();
 
     if refresh {
-        refresh_reservations(client, &mut s, all, now);
+        refresh_reservations(client, cfg, &mut s, all, now);
         save_store(&s, &path);
     }
 
@@ -795,25 +1010,43 @@ fn bookings_cmd(client: &Client, all: bool, show_secrets: bool, refresh: bool) -
         }
         return Ok(());
     }
+    // Only people who use several restaurants need the extra column.
+    let many = list.iter().any(|r| r.restaurant != DEFAULT_RESTAURANT);
+    let place = |slug: &str| {
+        if many {
+            format!("{slug:<14}  ")
+        } else {
+            String::new()
+        }
+    };
     println!(
-        "{:<6}  {:<16}  {:>6}  {:<10}  {:<14}  NAME",
-        "ID", "WHEN", "GUESTS", "SHIFT", "STATUS"
+        "{:<6}  {:<16}  {:>6}  {:<10}  {:<14}  {}NAME",
+        "ID",
+        "WHEN",
+        "GUESTS",
+        "SHIFT",
+        "STATUS",
+        place("RESTAURANT")
     );
     for r in &list {
         println!(
-            "{:<6}  {:<16}  {:>6}  {:<10}  {:<14}  {}",
+            "{:<6}  {:<16}  {:>6}  {:<10}  {:<14}  {}{}",
             r.short_id(),
             r.at.with_timezone(&Zurich).format("%a %d.%m. %H:%M"),
             r.people,
             r.shift,
             r.status_label(now),
+            place(&r.restaurant),
             r.name
         );
         if !r.comment.is_empty() {
             println!("        note: {}", r.comment);
         }
         if r.cancelable == Some(false) && r.is_upcoming(now) {
-            println!("        can no longer be cancelled online (call {RESTAURANT_PHONE})");
+            let contact = cfg
+                .restaurant(&r.restaurant)
+                .map_or_else(|_| "contact the restaurant".to_string(), |c| c.contact());
+            println!("        can no longer be cancelled online ({contact})");
         }
         if show_secrets {
             println!("        secret: {}", r.secret);
@@ -844,6 +1077,7 @@ fn bookings_cmd(client: &Client, all: bool, show_secrets: bool, refresh: bool) -
 /// already cancelled locally. Failures are reported per reservation and don't abort.
 fn refresh_reservations(
     client: &Client,
+    cfg: &Config,
     s: &mut Store,
     all: bool,
     now: chrono::DateTime<chrono::Utc>,
@@ -852,7 +1086,9 @@ fn refresh_reservations(
         if r.status == Status::Cancelled || !(all || r.is_upcoming(now)) {
             continue;
         }
-        match client.reservation_info(&r.secret) {
+        let info =
+            client_for(client, cfg, &r.restaurant).and_then(|c| c.reservation_info(&r.secret));
+        match info {
             Ok(info) => {
                 for change in r.apply_remote(info.as_ref(), now) {
                     println!("{}: {change}", r.short_id());
@@ -864,7 +1100,7 @@ fn refresh_reservations(
 }
 
 /// Save the bookings file, warning instead of failing (the server side already happened).
-fn save_store(s: &Store, path: &std::path::Path) {
+fn save_store(s: &Store, path: &Path) {
     if let Err(e) = s.save(path) {
         eprintln!("warning: could not update {}: {e:#}", path.display());
     }
@@ -895,12 +1131,17 @@ fn resolve_key(
     }
 }
 
-fn cancel_cmd(client: &Client, key: Option<&str>, yes: bool) -> Result<()> {
+fn cancel_cmd(client: &Client, cfg: &Config, key: Option<&str>, yes: bool) -> Result<()> {
     let path = store::default_path()?;
     let mut s = Store::load(&path)?;
     let now = chrono::Utc::now();
 
     let index = resolve_key(&s, key, now)?;
+    // A saved reservation knows its restaurant; a raw secret uses the selected one.
+    let client = &match index {
+        Some(i) => client_for(client, cfg, &s.reservations[i].restaurant)?,
+        None => client.clone(),
+    };
 
     let secret = match index {
         Some(i) => {
@@ -908,7 +1149,7 @@ fn cancel_cmd(client: &Client, key: Option<&str>, yes: bool) -> Result<()> {
             if r.status == Status::Cancelled {
                 bail!("reservation {} is already cancelled", r.short_id());
             }
-            println!("{}", describe(r));
+            println!("{}", describe(r, client.restaurant()));
             if r.at < now {
                 bail!("reservation {} is in the past", r.short_id());
             }
@@ -941,7 +1182,7 @@ fn check_cancelable(
     index: Option<usize>,
     secret: &str,
     now: chrono::DateTime<chrono::Utc>,
-    path: &std::path::Path,
+    path: &Path,
 ) -> Result<()> {
     let info = match client.reservation_info(secret) {
         Ok(info) => info,
@@ -971,7 +1212,8 @@ fn check_cancelable(
     }
     if info.cancelable == Some(false) {
         bail!(
-            "this reservation can no longer be cancelled online; please call the restaurant at {RESTAURANT_PHONE}"
+            "this reservation can no longer be cancelled online; please {}",
+            client.restaurant().contact()
         );
     }
     Ok(())
@@ -1011,6 +1253,7 @@ mod tests {
     #[test]
     fn reservation_candidates_offer_upcoming_ids_only() {
         let reservation = |id: Option<&str>, at: &str, status| Reservation {
+            restaurant: "bytes".into(),
             id: id.map(str::to_string),
             secret: "topsecret".into(),
             at: at.parse().unwrap(),
@@ -1051,11 +1294,13 @@ mod tests {
 
     #[test]
     fn cancel_hint_warns_only_on_definite_no() {
-        assert!(cancel_hint(Some(false), "abc").contains("can't be cancelled online"));
-        assert!(!cancel_hint(Some(false), "abc").contains("bytesctl cancel"));
+        let hint = cancel_hint(Some(false), "abc", "call the restaurant at +41 1");
+        assert!(hint.contains("can't be cancelled online"), "{hint}");
+        assert!(hint.contains("+41 1"), "{hint}");
+        assert!(!hint.contains("bytesctl cancel"), "{hint}");
         for known in [Some(true), None] {
             assert_eq!(
-                cancel_hint(known, "abc"),
+                cancel_hint(known, "abc", "call"),
                 "  Cancel with:    bytesctl cancel abc"
             );
         }

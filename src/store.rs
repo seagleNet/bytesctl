@@ -19,6 +19,9 @@ pub enum Status {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reservation {
+    /// The restaurant's slug. Bookings saved before there were several restaurants are at bytes.
+    #[serde(default = "default_restaurant")]
+    pub restaurant: String,
     /// aleno reservation id; may be missing if the server did not return one.
     pub id: Option<String>,
     /// Secret needed to cancel the reservation.
@@ -48,6 +51,10 @@ pub struct Reservation {
     pub not_found: bool,
     #[serde(default)]
     pub checked_at: Option<DateTime<Utc>>,
+}
+
+fn default_restaurant() -> String {
+    crate::config::DEFAULT_RESTAURANT.to_string()
 }
 
 /// Human label for an aleno reservation state code (codes from aleno's GraphQL
@@ -259,6 +266,7 @@ mod tests {
 
     fn res(id: &str, secret: &str, at: &str, status: Status) -> Reservation {
         Reservation {
+            restaurant: "bytes".into(),
             id: Some(id.into()),
             secret: secret.into(),
             at: at.parse().unwrap(),
@@ -351,6 +359,15 @@ mod tests {
         let mut r = res("abc123", "s", "2026-11-10T10:45:00Z", Status::Booked);
         assert_eq!(r.apply_remote(None, now), ["booked → not found"]);
         assert_eq!(r.status_label(now), "not found");
+    }
+
+    #[test]
+    fn old_records_belong_to_bytes() {
+        let mut v =
+            serde_json::to_value(res("a", "s", "2026-11-10T10:45:00Z", Status::Booked)).unwrap();
+        v.as_object_mut().unwrap().remove("restaurant");
+        let r: Reservation = serde_json::from_value(v).unwrap();
+        assert_eq!(r.restaurant, "bytes");
     }
 
     #[test]

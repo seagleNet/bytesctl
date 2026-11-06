@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-pub const HOMEPAGE: &str = "https://bytes-chur.ch/";
+const HOMEPAGE: &str = "https://bytes-chur.ch/";
 
 // ---------------------------------------------------------------------------------------------
 // Locating and downloading the PDF

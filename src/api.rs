@@ -1,9 +1,10 @@
-//! Minimal client for the aleno reservation widget API used by bytes-chur.ch.
+//! Minimal client for the aleno reservation widget API.
 //!
 //! The API key, restaurant id and domain come from the widget embedded on the restaurant's
 //! homepage (see `widget`). Every call is `POST {domain}/api/<endpoint>` with a JSON body that
 //! includes `restaurantId`, and `Authorization: <api key>`.
 
+use crate::config::Restaurant;
 use crate::widget::{self, Widget};
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, NaiveDate, Utc};
@@ -11,8 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-
-pub const RESTAURANT_PHONE: &str = "+41 81 253 01 01";
 
 /// A non-2xx response from the aleno API, keeping its machine-readable error code.
 #[derive(Debug)]
@@ -136,10 +135,12 @@ impl SelfEditOutcome {
     }
 }
 
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::blocking::Client,
     lang: String,
-    /// Loaded on the first API call (from cache, else the homepage).
+    restaurant: Restaurant,
+    /// Loaded on the first API call (from cache, else the restaurant's website).
     widget: RefCell<Option<Widget>>,
 }
 
@@ -149,6 +150,9 @@ pub struct Timeslot {
     pub selected_date: DateTime<Utc>,
     pub shift_id: String,
     pub shift_name: String,
+    /// The restaurant's name according to aleno.
+    #[serde(default)]
+    pub restaurant_name: Option<String>,
     #[serde(default, rename = "timeslotFull")]
     pub full: bool,
     #[serde(default)]
@@ -223,7 +227,7 @@ pub struct BookingResponse {
 }
 
 impl Client {
-    pub fn new(lang: &str) -> Result<Self> {
+    pub fn new(lang: &str, restaurant: Restaurant) -> Result<Self> {
         let http = reqwest::blocking::Client::builder()
             .user_agent("bytesctl/0.1")
             .timeout(std::time::Duration::from_secs(30))
@@ -231,15 +235,30 @@ impl Client {
         Ok(Self {
             http,
             lang: lang.to_string(),
+            restaurant,
             widget: RefCell::new(None),
         })
+    }
+
+    /// The same client, talking to another restaurant.
+    pub fn for_restaurant(&self, restaurant: Restaurant) -> Self {
+        Self {
+            http: self.http.clone(),
+            lang: self.lang.clone(),
+            restaurant,
+            widget: RefCell::new(None),
+        }
+    }
+
+    pub fn restaurant(&self) -> &Restaurant {
+        &self.restaurant
     }
 
     fn widget(&self) -> Result<Widget> {
         if let Some(w) = self.widget.borrow().as_ref() {
             return Ok(w.clone());
         }
-        let w = widget::load(&self.http)?;
+        let w = widget::load(&self.http, &self.restaurant)?;
         *self.widget.borrow_mut() = Some(w.clone());
         Ok(w)
     }
@@ -249,7 +268,7 @@ impl Client {
     }
 
     /// POST to `endpoint`, adding `restaurantId`. If aleno rejects the cached API key, the widget
-    /// settings are re-read from the homepage and the call is retried once.
+    /// settings are re-read from the website and the call is retried once.
     fn call(&self, endpoint: &str, body: &Value) -> Result<Value> {
         let w = self.widget()?;
         match self.send(&w, endpoint, body) {
@@ -257,7 +276,7 @@ impl Client {
                 if e.downcast_ref::<ApiError>()
                     .is_some_and(|a| a.code.as_deref() == Some("api-forbidden")) =>
             {
-                let fresh = widget::refresh(&self.http)?;
+                let fresh = widget::refresh(&self.http, &self.restaurant)?;
                 *self.widget.borrow_mut() = Some(fresh.clone());
                 if fresh.key == w.key && fresh.restaurant_id == w.restaurant_id {
                     return Err(e);
