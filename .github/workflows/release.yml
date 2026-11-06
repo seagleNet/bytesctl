@@ -60,7 +60,7 @@ jobs:
         run: |
           name=bytesctl-${{ matrix.target }}
           mkdir -p dist "$name"
-          cp README.md "$name/"
+          cp README.md LICENSE "$name/"
           if [ "$RUNNER_OS" = Windows ]; then
             cp target/${{ matrix.target }}/release/bytesctl.exe "$name/"
             7z a "dist/$name.zip" "$name"

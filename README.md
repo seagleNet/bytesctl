@@ -188,3 +188,7 @@ Use `--config <path>` or `$BYTES_CONFIG` for a different file.
 
 `book` asks for confirmation unless `-y/--yes` is given. Shifts that need a credit-card
 guarantee or extra questions are refused with a pointer to the website.
+
+## License
+
+[MIT](LICENSE)
