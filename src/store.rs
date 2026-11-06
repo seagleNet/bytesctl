@@ -173,8 +173,9 @@ pub fn default_path() -> Result<PathBuf> {
     let base = if let Some(dir) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
         PathBuf::from(dir)
     } else {
-        let home =
-            std::env::var_os("HOME").ok_or_else(|| anyhow!("cannot determine home directory"))?;
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .ok_or_else(|| anyhow!("cannot determine home directory"))?;
         PathBuf::from(home).join(".local").join("share")
     };
     Ok(base.join("bytesctl").join("bookings.json"))

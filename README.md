@@ -9,7 +9,16 @@ cached key. Other restaurants that use aleno can be added, see [Restaurants](#re
 
 ## Installation
 
-Needs a [Rust toolchain](https://rustup.rs/) (Rust 1.88 or newer):
+Download the archive for your system from the
+[latest release](https://github.com/seagleNet/bytesctl/releases/latest), unpack it and put
+`bytesctl` somewhere on your `PATH`. There are builds for Linux (x86_64 and ARM64, static, so they
+run on any distribution), macOS (Apple Silicon and Intel) and Windows (x86_64).
+
+The macOS builds aren't signed, so a copy downloaded with a browser has to be unblocked once:
+`xattr -d com.apple.quarantine bytesctl`.
+
+Or build it yourself, which needs a [Rust toolchain](https://rustup.rs/) (Rust 1.88 or newer) and a
+C compiler:
 
 ```sh
 cargo install --locked --git https://github.com/seagleNet/bytesctl
@@ -36,6 +45,18 @@ bytesctl completions fish > ~/.config/fish/completions/bytesctl.fish
 mkdir -p ~/.zfunc
 bytesctl completions zsh > ~/.zfunc/_bytesctl
 ```
+
+### Publishing a release
+
+Set the new `version` in `Cargo.toml`, run `cargo check` to update `Cargo.lock`, commit, then push a
+matching tag. The [release workflow](.github/workflows/release.yml) tests, builds and publishes it:
+
+```sh
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Running the workflow by hand from the Actions tab builds everything without publishing.
 
 ## Usage
 
